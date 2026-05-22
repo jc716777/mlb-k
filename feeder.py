@@ -208,7 +208,7 @@ class KalshiOddsFeeder:
             try:
                 headers = self._auth.headers("GET", self._cfg.ws_path)
                 async with websockets.connect(
-                    url, extra_headers=headers, ping_interval=10, ping_timeout=10
+                    url, additional_headers=headers, ping_interval=10, ping_timeout=10
                 ) as ws:
                     await ws.send(self._subscribe_msg())
                     log.info("Kalshi WS connected, subscribed to %s", self._cfg.market_ticker)
