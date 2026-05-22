@@ -275,6 +275,68 @@ def test_build_order_no_is_an_ask_on_the_yes_book():
 
 
 # --------------------------------------------------------------------------
+# Position management
+# --------------------------------------------------------------------------
+def test_position_creation_from_entry():
+    executor = KalshiExecutor(_interlock_off_config(), RiskManager(RiskConfig()), None)
+    signal = EdgeSignal(
+        market_ticker="T", side=Side.YES, p_clean=0.40, p_model=0.60,
+        edge=0.20, abs_edge=0.20, line_velocity=0.0, model_velocity=0.0,
+        mishandled_surge=False, target_price_cents=45, game_event="test",
+    )
+    executor._create_position(signal, entry_price_cents=45, size_contracts=10)
+    pos = executor.position_for("T")
+    assert pos is not None
+    assert pos.size_contracts == 10
+    assert pos.entry_price_cents == 45
+    # Edge 0.20 -> 20 cents
+    assert pos.stop_price_cents == 25  # 45 - 20
+    assert pos.target_1_price_cents == 65  # 45 + 20
+    # 45 + 60 = 105, but clamped to 99 (max Kalshi price)
+    assert pos.target_2_price_cents == 99  # min(99, 45 + 60)
+
+
+def test_no_pyramiding():
+    executor = KalshiExecutor(_interlock_off_config(), RiskManager(RiskConfig()), None)
+    signal = EdgeSignal(
+        market_ticker="T", side=Side.YES, p_clean=0.40, p_model=0.60,
+        edge=0.20, abs_edge=0.20, line_velocity=0.0, model_velocity=0.0,
+        mishandled_surge=False, target_price_cents=45, game_event="test",
+    )
+    executor._create_position(signal, entry_price_cents=45, size_contracts=10)
+
+    # Try to enter again on the same market; should be rejected.
+    result = asyncio.run(executor.execute(signal))
+    assert result.accepted is False
+    assert "position already open" in result.reject_reason
+
+
+def test_exit_evaluation():
+    executor = KalshiExecutor(_interlock_off_config(), RiskManager(RiskConfig()), None)
+    signal = EdgeSignal(
+        market_ticker="T", side=Side.YES, p_clean=0.40, p_model=0.60,
+        edge=0.20, abs_edge=0.20, line_velocity=0.0, model_velocity=0.0,
+        mishandled_surge=False, target_price_cents=45, game_event="test",
+    )
+    executor._create_position(signal, entry_price_cents=45, size_contracts=10)
+
+    # Position is OPEN
+    assert executor.evaluate_exits("T", 25) == "stop"  # Below stop
+    assert executor.evaluate_exits("T", 50) is None     # Between targets
+    assert executor.evaluate_exits("T", 65) == "target_1"  # At target_1
+
+    # Simulate T1 fill
+    executor.mark_position_t1_filled("T")
+    pos = executor.position_for("T")
+    assert pos.status.value == "t1_filled"
+
+    # Position is now T1_FILLED, stop is at breakeven (45)
+    assert executor.evaluate_exits("T", 45) == "stop"  # At breakeven stop
+    assert executor.evaluate_exits("T", 99) == "target_2"  # At target_2
+    assert executor.evaluate_exits("T", 50) is None     # Between stop and target_2
+
+
+# --------------------------------------------------------------------------
 # Engine signal logic
 # --------------------------------------------------------------------------
 def _evaluate_once(odds: MarketOdds) -> EdgeSignal | None:

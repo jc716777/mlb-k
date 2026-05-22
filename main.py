@@ -17,7 +17,7 @@ from engine import PullbackEngine
 from executor import KalshiExecutor, RiskManager
 from feeder import FeedEvent, KalshiOddsFeeder, MLBGameFeeder
 from kalshi import KalshiAuth, KalshiRestClient
-from models import GameState, MarketOdds
+from models import GameState, MarketOdds, PositionStatus
 from sabermetrics import PlayerStatsCache
 
 log = logging.getLogger("main")
@@ -44,6 +44,8 @@ async def consume(
 ) -> None:
     """Drain the feed queue, drop stale ticks, run the strategy."""
     stale_limit = cfg.strategy.stale_tick_s
+    game_state: GameState | None = None
+
     while not stop.is_set():
         try:
             event = await asyncio.wait_for(queue.get(), timeout=1.0)
@@ -53,10 +55,6 @@ async def consume(
         # A single malformed event or transient error must not kill the
         # consumer -- if it did, run() would hang forever waiting on `stop`.
         try:
-            # NOTE: event.timestamp is stamped when the feed parsed the
-            # message, so this measures pipeline latency, not true exchange-
-            # side staleness. For a strict 2s data-age rule, populate
-            # MarketOdds.timestamp from the Kalshi message's own timestamp.
             age = _age_seconds(event.timestamp)
 
             if isinstance(event, MarketOdds):
@@ -64,10 +62,32 @@ async def consume(
                     log.warning("dropping stale odds tick (age=%.2fs)", age)
                     continue
                 engine.update_odds(event)
+
+                # Check for exits on this odds tick.
+                exit_reason = executor.evaluate_exits(
+                    event.market_ticker, event.yes_mid
+                )
+                if exit_reason:
+                    await executor.execute_exit(
+                        event.market_ticker, exit_reason, event.yes_mid
+                    )
+
             elif isinstance(event, GameState):
+                game_state = event
                 engine.update_game_state(event)
+
+                # Flatten on final outs: bottom of 9th with 2+ outs, or top of 9th with 2 outs.
+                if game_state.inning == 9 and game_state.outs >= 2:
+                    for ticker, pos in list(executor.positions.items()):
+                        if pos.status != PositionStatus.CLOSED:
+                            log.info("FLATTEN: final outs detected; closing %s", ticker)
+                            executor.close_position(ticker)
+
                 if event.is_final:
                     log.info("final game state received; shutting down")
+                    # Close any remaining positions.
+                    for ticker in list(executor.positions.keys()):
+                        executor.close_position(ticker)
                     stop.set()
             else:  # pragma: no cover - queue is typed
                 continue

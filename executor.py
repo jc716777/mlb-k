@@ -13,11 +13,12 @@ import logging
 import math
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from config import ExecutionConfig, RiskConfig
 from kalshi import KalshiAPIError, KalshiRestClient
-from models import EdgeSignal, OrderResult, Side
+from models import EdgeSignal, OrderResult, Position, PositionStatus, Side
 
 log = logging.getLogger("executor")
 
@@ -87,6 +88,10 @@ class RiskManager:
             f"kill={'Y' if self.kill_switch else 'N'}"
         )
 
+    def release(self, contracts: int) -> None:
+        """Release committed contracts (e.g., when a position is closed)."""
+        self.open_contracts = max(0, self.open_contracts - contracts)
+
 
 class KalshiExecutor:
     """Builds, risk-checks, and transmits Kalshi orders."""
@@ -102,6 +107,7 @@ class KalshiExecutor:
         self._client = client
         self.fills: list[OrderResult] = []      # accepted, transmitted orders
         self.results: list[OrderResult] = []    # every execution outcome
+        self.positions: dict[str, Position] = {}  # market_ticker -> Position
 
     def _record(self, result: OrderResult) -> OrderResult:
         """Append every outcome to the audit trail; track accepted fills."""
@@ -144,6 +150,19 @@ class KalshiExecutor:
 
     async def execute(self, signal: EdgeSignal) -> OrderResult:
         """Risk-check and (if armed) transmit a real order for this signal."""
+        # Prevent pyramiding: reject if position already exists in this market.
+        if signal.market_ticker in self.positions:
+            pos = self.positions[signal.market_ticker]
+            if pos.status != PositionStatus.CLOSED:
+                result = OrderResult(
+                    signal=signal,
+                    accepted=False,
+                    live=False,
+                    reject_reason=f"position already open in {signal.market_ticker}",
+                )
+                log.warning(result.describe())
+                return self._record(result)
+
         # Model crossing the spread: we pay through the touch.
         limit_price = signal.target_price_cents + self._cfg.slippage_cents
         limit_price = min(limit_price, 99)
@@ -258,4 +277,171 @@ class KalshiExecutor:
         )
         log.info(result.describe())
         log.info("  risk: %s", self._risk.snapshot())
+
+        # Create a position for this entry.
+        self._create_position(signal, filled_price, fill_count)
         return self._record(result)
+
+    def _create_position(
+        self, signal: EdgeSignal, entry_price_cents: int, size_contracts: int
+    ) -> None:
+        """Create a new position after an entry order fills."""
+        edge_cents = int(round(signal.abs_edge * 100.0))
+        edge_cents = max(edge_cents, 1)  # Ensure positive edge
+
+        stop = entry_price_cents - edge_cents
+        target_1 = entry_price_cents + edge_cents
+        target_2 = entry_price_cents + 3 * edge_cents
+        stop_after_t1 = entry_price_cents  # Breakeven
+
+        position = Position(
+            market_ticker=signal.market_ticker,
+            side=signal.side,
+            entry_signal=signal,
+            entry_price_cents=entry_price_cents,
+            size_contracts=size_contracts,
+            stop_price_cents=max(1, stop),  # Clamp to valid range
+            target_1_price_cents=min(99, target_1),
+            target_2_price_cents=min(99, target_2),
+            stop_after_t1_cents=min(99, stop_after_t1),
+        )
+        self.positions[signal.market_ticker] = position
+        log.info(
+            "POSITION OPEN: %s %s x%d @ %dc | stop=%dc T1=%dc T2=%dc",
+            signal.market_ticker, signal.side.value.upper(), size_contracts,
+            entry_price_cents, position.stop_price_cents, position.target_1_price_cents,
+            position.target_2_price_cents,
+        )
+
+    def position_for(self, market_ticker: str) -> Optional[Position]:
+        """Get the open position for a market, or None."""
+        pos = self.positions.get(market_ticker)
+        if pos and pos.status != PositionStatus.CLOSED:
+            return pos
+        return None
+
+    def mark_position_t1_filled(self, market_ticker: str) -> None:
+        """Mark the position's first tier as filled."""
+        pos = self.positions.get(market_ticker)
+        if pos:
+            pos = pos.model_copy(
+                update={
+                    "status": PositionStatus.T1_FILLED,
+                    "t1_filled_at": datetime.now(timezone.utc),
+                }
+            )
+            self.positions[market_ticker] = pos
+            log.info("POSITION T1 FILLED: %s | stop moved to breakeven", market_ticker)
+
+    def close_position(self, market_ticker: str) -> Optional[Position]:
+        """Mark a position as closed."""
+        pos = self.positions.get(market_ticker)
+        if pos:
+            pos = pos.model_copy(
+                update={
+                    "status": PositionStatus.CLOSED,
+                    "closed_at": datetime.now(timezone.utc),
+                }
+            )
+            self.positions[market_ticker] = pos
+            self._risk.release(pos.size_contracts)
+            log.info("POSITION CLOSED: %s | size=%d", market_ticker, pos.size_contracts)
+            return pos
+        return None
+
+    def evaluate_exits(self, market_ticker: str, current_price_cents: int) -> Optional[str]:
+        """Check if a position should exit on current market price.
+
+        Returns the exit reason if an exit is triggered: "stop", "target_1", "target_2".
+        Returns None if no exit is triggered.
+        """
+        pos = self.position_for(market_ticker)
+        if not pos:
+            return None
+
+        # Determine the relevant price based on position side.
+        # For a long (YES) position: check against the bid (price we can sell at).
+        # For a short (NO) position: check against the ask (price we can cover at).
+        effective_price = current_price_cents
+
+        if pos.status == PositionStatus.OPEN:
+            # Check stop first (hard exit).
+            if effective_price <= pos.stop_price_cents:
+                return "stop"
+            # Check target_1 (sell half).
+            if effective_price >= pos.target_1_price_cents:
+                return "target_1"
+            # Check target_2 (sell rest).
+            if effective_price >= pos.target_2_price_cents:
+                return "target_2"
+
+        elif pos.status == PositionStatus.T1_FILLED:
+            # After T1 is filled, stop is moved to breakeven.
+            if effective_price <= pos.stop_after_t1_cents:
+                return "stop"
+            # Check target_2 (sell remaining).
+            if effective_price >= pos.target_2_price_cents:
+                return "target_2"
+
+        return None
+
+    async def execute_exit(
+        self, market_ticker: str, exit_reason: str, current_price_cents: int
+    ) -> bool:
+        """Execute an exit order for a position.
+
+        Returns True if an exit order was executed, False otherwise.
+        """
+        pos = self.position_for(market_ticker)
+        if not pos:
+            return False
+
+        # Determine how many contracts to sell.
+        if exit_reason == "target_1" and pos.status == PositionStatus.OPEN:
+            # Sell half at target_1.
+            contracts = pos.size_contracts // 2
+            limit_price = pos.target_1_price_cents
+            self.mark_position_t1_filled(market_ticker)
+        elif exit_reason in ("target_2", "stop"):
+            # Sell remaining at market.
+            contracts = pos.size_contracts
+            limit_price = current_price_cents
+            self.close_position(market_ticker)
+        else:
+            return False
+
+        if contracts <= 0:
+            return False
+
+        # Build an exit order (opposite side of entry).
+        exit_side = Side.NO if pos.side == Side.YES else Side.YES
+        order_dict = {
+            "ticker": market_ticker,
+            "client_order_id": str(uuid.uuid4()),
+            "side": "ask" if exit_side == Side.YES else "bid",
+            "count": str(contracts),
+            "price": f"{limit_price / 100.0:.4f}",
+            "time_in_force": "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+
+        if self._client is None:
+            log.warning("no REST client; cannot execute exit for %s", market_ticker)
+            return False
+
+        try:
+            response = await self._client.create_order(order_dict, timeout_s=self._cfg.order_timeout_s)
+            fill_count = int(float(response.get("fill_count") or 0))
+            if fill_count > 0:
+                log.info(
+                    "EXIT %s: %s x%d @ %dc | reason=%s",
+                    market_ticker, exit_side.value.upper(), fill_count,
+                    current_price_cents, exit_reason,
+                )
+                return True
+            else:
+                log.warning("exit order for %s did not fill", market_ticker)
+                return False
+        except (KalshiAPIError, Exception) as exc:
+            log.error("exit order failed for %s: %s", market_ticker, exc)
+            return False

@@ -230,6 +230,38 @@ class OrderResult(BaseModel):
         )
 
 
+class PositionStatus(str, Enum):
+    """Lifecycle of a position."""
+    OPEN = "open"
+    T1_FILLED = "t1_filled"  # Sold half at target_1; rest at target_2 pending
+    CLOSED = "closed"
+
+
+class Position(BaseModel):
+    """Tracks an open position: entry, exit targets, and status."""
+
+    model_config = ConfigDict(frozen=True)
+
+    market_ticker: str
+    side: Side
+    entry_signal: EdgeSignal      # Original signal that opened the position
+    entry_price_cents: int        # Actual entry price
+    size_contracts: int           # Initial position size
+    status: PositionStatus = PositionStatus.OPEN
+
+    # Exit targets (price = entry ± edge * 100, where edge is in cents).
+    stop_price_cents: int         # entry - edge_cents (risk limit)
+    target_1_price_cents: int     # entry + edge_cents (sell half here, 1:1 risk/reward)
+    target_2_price_cents: int     # entry + 3 * edge_cents (sell rest, 3:1 risk/reward)
+
+    # After target_1 is hit, move stop to breakeven.
+    stop_after_t1_cents: int = 0  # Set when T1 is filled; 0 means not yet set
+
+    opened_at: datetime = Field(default_factory=utcnow)
+    t1_filled_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+
+
 def normal_cdf(x: float) -> float:
     """Standard-normal CDF via erf; used by the win-probability model."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
