@@ -85,10 +85,12 @@ Test files: `test_framework.py` (unit tests), `mockfeed.py` (scripted feeders),
 
 * **Live-trading interlock.** `executor.py` will not transmit a real order
   unless `KALSHI_LIVE_TRADING_ENABLED=true`. Hard caps (max contracts, max
-  position cost, daily-loss kill switch) always apply.
-* **Untested live paths.** The Kalshi order and WebSocket-auth code is written
-  to Kalshi's documented API but has **not** been tested against the exchange.
-  Verify it on Kalshi's demo environment (`demo-api.kalshi.co`) first.
+  position cost) always apply; the daily-loss kill switch is inert until P&L
+  is wired from settlement.
+* **Verified against docs, not the live exchange.** The Kalshi order,
+  market-data, and auth code matches the current V2 API docs but has **not**
+  been run against the exchange. Dry-run it on the demo environment
+  (`external-api.demo.kalshi.co`) with the interlock off first.
 * **The strategy is unproven.** The model adjusts for park and the live
   pitcher/batter matchup and reports leverage, but it is still a simplified
   baseline: no bullpen projection, batting-order context, platoon splits,

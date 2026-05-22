@@ -41,11 +41,16 @@ class KalshiConfig:
 
     api_key_id: str = field(default_factory=lambda: _env("KALSHI_API_KEY_ID"))
     private_key_path: str = field(default_factory=lambda: _env("KALSHI_PRIVATE_KEY_PATH"))
+    # Defaults point at Kalshi's demo environment -- dry-run there first.
     rest_base: str = field(
-        default_factory=lambda: _env("KALSHI_REST_BASE", "https://demo-api.kalshi.co")
+        default_factory=lambda: _env(
+            "KALSHI_REST_BASE", "https://external-api.demo.kalshi.co"
+        )
     )
     ws_base: str = field(
-        default_factory=lambda: _env("KALSHI_WS_BASE", "wss://demo-api.kalshi.co")
+        default_factory=lambda: _env(
+            "KALSHI_WS_BASE", "wss://external-api-ws.demo.kalshi.co"
+        )
     )
     # Path segments are stable across environments.
     rest_prefix: str = "/trade-api/v2"

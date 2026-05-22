@@ -13,6 +13,7 @@ import dataclasses
 from config import ExecutionConfig, RiskConfig, StrategyConfig
 from engine import PullbackEngine, WinProbabilityModel, _Series, run_expectancy
 from executor import KalshiExecutor, RiskManager
+from feeder import KalshiOddsFeeder
 from models import EdgeSignal, GameState, HalfInning, MarketOdds, Side
 from sabermetrics import BatterStats, PitcherStats, _parse_innings, park_factor
 
@@ -221,6 +222,56 @@ def test_executor_interlock_blocks_orders():
     assert "interlock" in result.reject_reason
     assert len(executor.results) == 1   # outcome recorded
     assert len(executor.fills) == 0     # nothing transmitted
+
+
+# --------------------------------------------------------------------------
+# Kalshi V2 I/O
+# --------------------------------------------------------------------------
+def test_ticker_parse_converts_dollar_strings_to_cents():
+    odds = KalshiOddsFeeder._parse({
+        "type": "ticker",
+        "sid": 7,
+        "msg": {
+            "market_ticker": "KXMLB-TEST",
+            "yes_bid_dollars": "0.5600",
+            "yes_ask_dollars": "0.5900",
+            "ts_ms": 1_700_000_000_000,
+        },
+    })
+    assert odds is not None
+    assert (odds.yes_bid, odds.yes_ask) == (56, 59)
+    assert (odds.no_bid, odds.no_ask) == (41, 44)  # mirror of the YES book
+
+
+def test_ticker_parse_ignores_non_ticker_messages():
+    assert KalshiOddsFeeder._parse({"type": "subscribed", "msg": {}}) is None
+
+
+def test_build_order_yes_is_a_bid():
+    executor = KalshiExecutor(_interlock_off_config(), RiskManager(RiskConfig()), None)
+    signal = EdgeSignal(
+        market_ticker="T", side=Side.YES, p_clean=0.40, p_model=0.60,
+        edge=0.20, abs_edge=0.20, line_velocity=0.0, model_velocity=0.0,
+        mishandled_surge=False, target_price_cents=46, game_event="t",
+    )
+    order = executor._build_order(signal, contracts=5, limit_price_cents=48)
+    assert order["side"] == "bid"
+    assert order["price"] == "0.4800"
+    assert order["count"] == "5"
+    assert order["time_in_force"] == "immediate_or_cancel"
+
+
+def test_build_order_no_is_an_ask_on_the_yes_book():
+    executor = KalshiExecutor(_interlock_off_config(), RiskManager(RiskConfig()), None)
+    signal = EdgeSignal(
+        market_ticker="T", side=Side.NO, p_clean=0.60, p_model=0.40,
+        edge=-0.20, abs_edge=0.20, line_velocity=0.0, model_velocity=0.0,
+        mishandled_surge=False, target_price_cents=55, game_event="t",
+    )
+    # Buying NO at a 60c limit == selling YES at 40c.
+    order = executor._build_order(signal, contracts=3, limit_price_cents=60)
+    assert order["side"] == "ask"
+    assert order["price"] == "0.4000"
 
 
 # --------------------------------------------------------------------------

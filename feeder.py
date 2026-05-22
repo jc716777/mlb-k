@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Union
 
 import aiohttp
@@ -34,6 +35,11 @@ async def _backoff(attempt: int, cap: float = 16.0) -> None:
     delay = min(cap, 2.0 ** attempt)
     log.warning("reconnecting in %.0fs (attempt %d)", delay, attempt)
     await asyncio.sleep(delay)
+
+
+def _dollars_to_cents(value: object) -> int:
+    """Convert a Kalshi fixed-point dollar string/number to integer cents."""
+    return round(float(value) * 100.0)
 
 
 # --------------------------------------------------------------------------
@@ -180,28 +186,34 @@ class KalshiOddsFeeder:
 
     @staticmethod
     def _parse(msg: dict) -> Optional[MarketOdds]:
-        """Build a MarketOdds from a Kalshi ticker-channel message.
+        """Build a MarketOdds from a Kalshi `ticker` channel message.
 
-        UNVERIFIED -- likely wrong vs. the current API. Web docs indicate the
-        live `ticker` message uses `yes_bid_dollars`/`yes_ask_dollars` (price
-        in DOLLARS) and `ts_ms`, not the integer-cent `yes_bid`/`yes_ask`
-        fields read below. Confirm against a real message before live use.
+        The ticker `msg` carries yes_bid_dollars / yes_ask_dollars as
+        fixed-point dollar strings (e.g. "0.5600"); these convert to the
+        integer-cent model. ts_ms is the exchange-side update timestamp.
         """
         if msg.get("type") != "ticker":
             return None
         body = msg.get("msg", {})
         try:
-            yes_bid = int(body["yes_bid"])  # FIXME: likely yes_bid_dollars * 100
-            yes_ask = int(body["yes_ask"])  # FIXME: likely yes_ask_dollars * 100
-            # Kalshi NO book is the mirror of the YES book.
+            yes_bid = _dollars_to_cents(body["yes_bid_dollars"])
+            yes_ask = _dollars_to_cents(body["yes_ask_dollars"])
+            # Kalshi's NO book is the mirror of the YES book.
             no_bid = 100 - yes_ask
             no_ask = 100 - yes_bid
+            ts_ms = body.get("ts_ms")
+            timestamp = (
+                datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+                if ts_ms
+                else datetime.now(timezone.utc)
+            )
             return MarketOdds(
                 market_ticker=body.get("market_ticker", ""),
                 yes_bid=yes_bid,
                 yes_ask=yes_ask,
                 no_bid=no_bid,
                 no_ask=no_ask,
+                timestamp=timestamp,
             )
         except (KeyError, TypeError, ValueError) as exc:
             log.error("failed to parse Kalshi ticker: %s", exc)
@@ -226,6 +238,20 @@ class KalshiOddsFeeder:
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
+                            continue
+                        msg_type = msg.get("type")
+                        if msg_type == "error":
+                            err = msg.get("msg", {})
+                            log.error(
+                                "Kalshi WS error %s: %s",
+                                err.get("code"), err.get("msg"),
+                            )
+                            continue
+                        if msg_type == "subscribed":
+                            log.info(
+                                "Kalshi WS subscription confirmed (sid=%s)",
+                                msg.get("msg", {}).get("sid"),
+                            )
                             continue
                         odds = self._parse(msg)
                         if odds is not None:

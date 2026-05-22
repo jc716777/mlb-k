@@ -119,27 +119,28 @@ class KalshiExecutor:
     def _build_order(
         self, signal: EdgeSignal, contracts: int, limit_price_cents: int
     ) -> dict:
-        """Build a Kalshi order body.
+        """Build a Kalshi V2 order body (POST /portfolio/events/orders).
 
-        UNVERIFIED -- this is the LEGACY /portfolio/orders body. The V2
-        endpoint (/portfolio/events/orders) expects different fields: `price`
-        as fixed-point dollars, `count` as a string, side as bid/ask. Confirm
-        against the docs before live use.
+        V2 quotes everything from the YES book: side 'bid' = buy YES,
+        'ask' = sell YES. A NO signal is expressed as selling YES, so the
+        YES-side limit price is 100c minus the NO cost we are willing to pay.
+        `count` and `price` are strings; `price` is fixed-point dollars.
         """
-        order: dict = {
+        if signal.side == Side.YES:
+            v2_side = "bid"
+            yes_price_cents = limit_price_cents
+        else:  # buying NO is economically selling YES
+            v2_side = "ask"
+            yes_price_cents = 100 - limit_price_cents
+        return {
             "ticker": signal.market_ticker,
             "client_order_id": str(uuid.uuid4()),
-            "action": "buy",
-            "side": signal.side.value,
-            "count": contracts,
-            "type": "limit",
+            "side": v2_side,
+            "count": str(contracts),
+            "price": f"{yes_price_cents / 100.0:.4f}",
+            "time_in_force": "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        # Kalshi limit orders name the price field after the side being bought.
-        if signal.side == Side.YES:
-            order["yes_price"] = limit_price_cents
-        else:
-            order["no_price"] = limit_price_cents
-        return order
 
     async def execute(self, signal: EdgeSignal) -> OrderResult:
         """Risk-check and (if armed) transmit a real order for this signal."""
@@ -204,22 +205,50 @@ class KalshiExecutor:
             return self._record(result)
 
         latency_ms = (time.perf_counter() - started) * 1000.0
-        order_obj = response.get("order", response)
-        order_id = order_obj.get("order_id") or order_obj.get("id")
+        order_id = response.get("order_id")
+        fill_count = int(float(response.get("fill_count") or 0))
 
-        # Kalshi limit orders may rest; we model an immediate cross to the limit.
-        filled_price = limit_price
+        if fill_count <= 0:
+            # IOC order accepted by the exchange but nothing crossed.
+            result = OrderResult(
+                signal=signal,
+                accepted=False,
+                live=True,
+                order_id=str(order_id) if order_id else None,
+                contracts=0,
+                requested_price_cents=limit_price,
+                latency_ms=latency_ms,
+                reject_reason="immediate-or-cancel: nothing filled",
+            )
+            log.warning(result.describe())
+            return self._record(result)
+
+        # average_fill_price is a YES-book price. For a NO buy we sold YES, so
+        # the cost of each NO contract is 100c minus the YES price transacted.
+        avg_fill = response.get("average_fill_price")
+        yes_fill_cents = round(float(avg_fill) * 100.0) if avg_fill else limit_price
+        if signal.side == Side.YES:
+            filled_price = yes_fill_cents
+        else:
+            filled_price = 100 - yes_fill_cents
+
+        # Prefer the exchange's reported fee; fall back to the modeled estimate.
+        avg_fee = response.get("average_fee_paid")
+        if avg_fee is not None:
+            fee = round(float(avg_fee) * 100.0 * fill_count)
+        else:
+            fee = self._fee_cents(fill_count, filled_price)
+
         slippage = filled_price - signal.target_price_cents
-        fee = self._fee_cents(contracts, filled_price)
-        notional = contracts * filled_price + fee
+        notional = fill_count * filled_price + fee
 
-        self._risk.commit(contracts, notional)
+        self._risk.commit(fill_count, notional)
         result = OrderResult(
             signal=signal,
             accepted=True,
             live=True,
             order_id=str(order_id) if order_id else None,
-            contracts=contracts,
+            contracts=fill_count,
             requested_price_cents=limit_price,
             filled_price_cents=filled_price,
             slippage_cents=slippage,
