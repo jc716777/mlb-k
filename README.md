@@ -25,6 +25,40 @@ cp .env.example .env        # then fill in credentials and targets
 python main.py
 ```
 
+## Testing
+
+There are three layers; the first two need no network and no API keys.
+
+**1. Unit tests** — the math and state machine (vig stripping, RE24, win
+probability, leverage, park/pitcher/batter factors, momentum, risk caps, fee
+math, the interlock, signal logic):
+
+```bash
+pytest test_framework.py -v
+```
+
+**2. Offline end-to-end simulation** — runs the real engine and executor
+against scripted mock feeders (`mockfeed.py`). The scenario is a "mishandled
+surge": a two-out walk the model treats as near-irrelevant triggers a violent
+line move; you should see the engine flag the surge and decide to fade it,
+with the live interlock blocking the order:
+
+```bash
+python simulate.py
+```
+
+**3. Live-feed testing** — point the real feeds at a game in progress. The MLB
+StatsAPI is public; Kalshi market data needs valid API keys. Keep the interlock
+**off** (`KALSHI_LIVE_TRADING_ENABLED` unset) so `main.py` logs intended orders
+without sending them. Verify the Kalshi auth/order paths against the demo
+environment (`demo-api.kalshi.co`) before going to production.
+
+> A restricted environment network policy can block `statsapi.mlb.com` and the
+> Kalshi hosts; run live-feed tests where those hosts are reachable.
+
+Test files: `test_framework.py` (unit tests), `mockfeed.py` (scripted feeders),
+`simulate.py` (offline runner).
+
 ## Strategy summary
 
 1. **Vig strip** — Kalshi YES/NO asks are converted to implied probabilities;

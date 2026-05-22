@@ -88,12 +88,20 @@ class KalshiExecutor:
         self,
         cfg: ExecutionConfig,
         risk: RiskManager,
-        client: KalshiRestClient,
+        client: Optional[KalshiRestClient],
     ) -> None:
         self._cfg = cfg
         self._risk = risk
         self._client = client
-        self.fills: list[OrderResult] = []
+        self.fills: list[OrderResult] = []      # accepted, transmitted orders
+        self.results: list[OrderResult] = []    # every execution outcome
+
+    def _record(self, result: OrderResult) -> OrderResult:
+        """Append every outcome to the audit trail; track accepted fills."""
+        self.results.append(result)
+        if result.accepted:
+            self.fills.append(result)
+        return result
 
     def _fee_cents(self, contracts: int, price_cents: int) -> int:
         """Kalshi trading fee: ceil(coeff * C * P * (1-P)), P in dollars."""
@@ -131,7 +139,7 @@ class KalshiExecutor:
                 signal=signal, accepted=False, live=False, reject_reason=reject
             )
             log.warning(result.describe())
-            return result
+            return self._record(result)
 
         # --- live-trading interlock -----------------------------------------
         if not self._cfg.live_trading_enabled:
@@ -147,7 +155,19 @@ class KalshiExecutor:
                 "INTERLOCK: would buy %s x%d @ %dc -- order NOT sent",
                 signal.side.value.upper(), contracts, limit_price,
             )
-            return result
+            return self._record(result)
+
+        if self._client is None:
+            result = OrderResult(
+                signal=signal,
+                accepted=False,
+                live=False,
+                contracts=contracts,
+                requested_price_cents=limit_price,
+                reject_reason="no REST client configured",
+            )
+            log.error(result.describe())
+            return self._record(result)
 
         order = self._build_order(signal, contracts, limit_price)
         started = time.perf_counter()
@@ -167,7 +187,7 @@ class KalshiExecutor:
                 reject_reason=f"transmit failed: {exc}",
             )
             log.error(result.describe())
-            return result
+            return self._record(result)
 
         latency_ms = (time.perf_counter() - started) * 1000.0
         order_obj = response.get("order", response)
@@ -193,7 +213,6 @@ class KalshiExecutor:
             notional_cents=notional,
             latency_ms=latency_ms,
         )
-        self.fills.append(result)
         log.info(result.describe())
         log.info("  risk: %s", self._risk.snapshot())
-        return result
+        return self._record(result)
