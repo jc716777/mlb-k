@@ -111,6 +111,13 @@ class StrategyConfig:
     signal_cooldown_s: float = field(
         default_factory=lambda: _env_float("SIGNAL_COOLDOWN_S", 20.0)
     )
+    # Weight on the current batter when adjusting the live half-inning's run
+    # expectancy; the remainder of the inning regresses to league average.
+    current_batter_weight: float = 0.35
+    # Suppress signals in situations below this Leverage Index (0.0 disables).
+    min_leverage_index: float = field(
+        default_factory=lambda: _env_float("MIN_LEVERAGE_INDEX", 0.0)
+    )
 
 
 @dataclass(frozen=True)

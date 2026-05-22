@@ -23,6 +23,7 @@ import websockets
 from config import KalshiConfig, MLBConfig
 from kalshi import KalshiAuth
 from models import GameState, HalfInning, MarketOdds
+from sabermetrics import PlayerStatsCache
 
 log = logging.getLogger("feeder")
 
@@ -41,9 +42,15 @@ async def _backoff(attempt: int, cap: float = 16.0) -> None:
 class MLBGameFeeder:
     """Polls the StatsAPI live feed and emits a GameState only when it changes."""
 
-    def __init__(self, cfg: MLBConfig, queue: "asyncio.Queue[FeedEvent]") -> None:
+    def __init__(
+        self,
+        cfg: MLBConfig,
+        queue: "asyncio.Queue[FeedEvent]",
+        stats_cache: PlayerStatsCache,
+    ) -> None:
         self._cfg = cfg
         self._queue = queue
+        self._stats = stats_cache
         self._last_key: Optional[tuple] = None
 
     @staticmethod
@@ -78,6 +85,11 @@ class MLBGameFeeder:
             current_play = live.get("plays", {}).get("currentPlay", {})
             last_event = current_play.get("result", {}).get("description", "") or ""
 
+            venue = str(game_data.get("venue", {}).get("name", "") or "")
+            defense = linescore.get("defense", {})
+            pitcher_id = defense.get("pitcher", {}).get("id")
+            batter_id = offense.get("batter", {}).get("id")
+
             return GameState(
                 game_pk=game_pk,
                 inning=int(linescore.get("currentInning", 1) or 1),
@@ -86,6 +98,9 @@ class MLBGameFeeder:
                 runners_on_base=runners,
                 home_score=home_score,
                 away_score=away_score,
+                pitcher_id=pitcher_id,
+                batter_id=batter_id,
+                venue=venue,
                 last_event=last_event,
                 is_final=is_final,
             )
@@ -109,6 +124,10 @@ class MLBGameFeeder:
                     state = self._parse(payload)
                     if state is not None and state.situation_key() != self._last_key:
                         self._last_key = state.situation_key()
+                        # Warm the stats cache so the engine can read it sync.
+                        await self._stats.ensure(
+                            session, state.pitcher_id, state.batter_id
+                        )
                         log.info(
                             "game state: I%d-%s outs=%d bases=%s %d-%d | %s",
                             state.inning, state.half_inning.value, state.outs,

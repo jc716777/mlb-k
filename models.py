@@ -44,6 +44,10 @@ class GameState(BaseModel):
     runners_on_base: tuple[bool, bool, bool]
     home_score: int = Field(ge=0)
     away_score: int = Field(ge=0)
+    # Matchup / context, used for run-environment adjustments.
+    pitcher_id: Optional[int] = None
+    batter_id: Optional[int] = None
+    venue: str = ""
     timestamp: datetime = Field(default_factory=utcnow)
     last_event: str = ""
     is_final: bool = False
@@ -71,7 +75,10 @@ class GameState(BaseModel):
         return self.home_score - self.away_score
 
     def situation_key(self) -> tuple:
-        """Hashable key identifying the discrete game situation (ignores time)."""
+        """Hashable key identifying the discrete game situation (ignores time).
+
+        Includes pitcher/batter so a new matchup re-triggers evaluation.
+        """
         return (
             self.inning,
             self.half_inning,
@@ -79,6 +86,8 @@ class GameState(BaseModel):
             self.runners_on_base,
             self.home_score,
             self.away_score,
+            self.pitcher_id,
+            self.batter_id,
         )
 
 
@@ -149,6 +158,11 @@ class ModelEstimate(BaseModel):
     expected_runs_inning: float  # RE24 expected runs for the current half-inning
     mean_final_diff: float       # expected (home - away) final run differential
     sigma_final_diff: float      # std dev of the final differential
+    leverage_index: float = 1.0  # WP volatility vs. a neutral mid-game state
+    park_factor: float = 1.0     # ballpark run multiplier applied
+    pitcher_factor: float = 1.0  # current pitcher run-suppression multiplier
+    batter_factor: float = 1.0   # current batter run-creation multiplier
+    matchup_factor: float = 1.0  # combined multiplier on the live half-inning
     timestamp: datetime = Field(default_factory=utcnow)
 
 
@@ -166,6 +180,7 @@ class EdgeSignal(BaseModel):
     line_velocity: float         # dProb/dt over the momentum window
     model_velocity: float        # dP_model/dt over the same window
     mishandled_surge: bool
+    leverage_index: float = 1.0  # WP volatility of the situation
     target_price_cents: int      # price we intend to pay
     game_event: str
     timestamp: datetime = Field(default_factory=utcnow)
@@ -177,6 +192,7 @@ class EdgeSignal(BaseModel):
             f"edge={self.edge:+.3f} v_line={self.line_velocity:+.4f}/s "
             f"v_model={self.model_velocity:+.4f}/s "
             f"surge={'Y' if self.mishandled_surge else 'N'} "
+            f"LI={self.leverage_index:.2f} "
             f"target={self.target_price_cents}c | {self.game_event}"
         )
 
@@ -217,3 +233,8 @@ class OrderResult(BaseModel):
 def normal_cdf(x: float) -> float:
     """Standard-normal CDF via erf; used by the win-probability model."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def normal_pdf(x: float) -> float:
+    """Standard-normal PDF; used to gauge win-probability leverage."""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)

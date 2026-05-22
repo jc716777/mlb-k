@@ -18,6 +18,7 @@ from executor import KalshiExecutor, RiskManager
 from feeder import FeedEvent, KalshiOddsFeeder, MLBGameFeeder
 from kalshi import KalshiAuth, KalshiRestClient
 from models import GameState, MarketOdds
+from sabermetrics import PlayerStatsCache
 
 log = logging.getLogger("main")
 
@@ -82,7 +83,8 @@ async def run(cfg: AppConfig) -> None:
     queue: "asyncio.Queue[FeedEvent]" = asyncio.Queue(maxsize=1000)
     stop = asyncio.Event()
 
-    engine = PullbackEngine(cfg.strategy, cfg.mlb.regulation_innings)
+    stats_cache = PlayerStatsCache(cfg.mlb.statsapi_base)
+    engine = PullbackEngine(cfg.strategy, cfg.mlb.regulation_innings, stats_cache)
     risk = RiskManager(cfg.risk)
 
     # Install signal handlers for a clean shutdown.
@@ -102,7 +104,7 @@ async def run(cfg: AppConfig) -> None:
             log.error("could not fetch Kalshi balance: %s", exc)
 
         executor = KalshiExecutor(cfg.execution, risk, client)
-        mlb_feeder = MLBGameFeeder(cfg.mlb, queue)
+        mlb_feeder = MLBGameFeeder(cfg.mlb, queue, stats_cache)
         odds_feeder = KalshiOddsFeeder(cfg.kalshi, auth, queue)
 
         tasks = [
