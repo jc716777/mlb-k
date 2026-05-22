@@ -33,6 +33,13 @@ class RiskManager:
         self.kill_switch: bool = False
 
     def record_realized(self, pnl_cents: int) -> None:
+        """Feed realized P&L to the daily-loss kill switch.
+
+        WARNING: nothing calls this yet -- there is no fill/settlement
+        tracking, so the kill switch is currently inert. Live exposure is
+        bounded by max_position_cost_cents and the contract caps, not by
+        realized loss. Wire this to a Kalshi fills/settlement feed to activate.
+        """
         self.realized_pnl_cents += pnl_cents
         if self.realized_pnl_cents <= -self._cfg.daily_loss_limit_cents:
             self.kill_switch = True

@@ -293,6 +293,10 @@ class PullbackEngine:
         """Recompute the model and emit a signal if the edge clears alpha."""
         if self._game_state is None or self._odds is None:
             return None
+        # No signals once the game is final -- the market is settling and any
+        # apparent edge is just the line converging to 0 or 100.
+        if self._game_state.is_final:
+            return None
 
         # Heavy(ish) matrix/stat work off the event loop.
         loop = asyncio.get_running_loop()

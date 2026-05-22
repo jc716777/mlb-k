@@ -135,6 +135,8 @@ class RiskConfig:
         default_factory=lambda: _env_int("MAX_POSITION_COST_CENTS", 2500)
     )
     # Realized loss (cents) that trips the kill switch for the day.
+    # NOTE: inert until P&L is wired from settlement -- see
+    # RiskManager.record_realized. The position-cost cap is the live bound.
     daily_loss_limit_cents: int = field(
         default_factory=lambda: _env_int("DAILY_LOSS_LIMIT_CENTS", 1200)
     )

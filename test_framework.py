@@ -254,3 +254,21 @@ def test_engine_silent_when_market_is_fair():
         MarketOdds(market_ticker="T", yes_bid=49, yes_ask=52, no_bid=48, no_ask=51)
     )
     assert signal is None
+
+
+def test_engine_silent_on_final_game():
+    # Game over: model is 1.0; even a lagging market must not produce a signal.
+    async def _run():
+        engine = PullbackEngine(StrategyConfig())
+        engine.update_game_state(_game_state(
+            inning=9, half_inning=HalfInning.BOTTOM, outs=3,
+            home_score=5, away_score=2, is_final=True,
+        ))
+        engine.update_odds(
+            MarketOdds(market_ticker="T", yes_bid=78, yes_ask=82, no_bid=18, no_ask=22)
+        )
+        signal = await engine.evaluate()
+        engine.shutdown()
+        return signal
+
+    assert asyncio.run(_run()) is None

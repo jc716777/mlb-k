@@ -59,6 +59,9 @@ async def run() -> None:
             consume(cfg, queue, engine, executor, stop), name="consumer"
         ),
     ]
+    # If any task exits unexpectedly, trip `stop` so the run never hangs.
+    for task in tasks:
+        task.add_done_callback(lambda _t: stop.set())
     await stop.wait()
     for task in tasks:
         task.cancel()

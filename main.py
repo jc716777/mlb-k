@@ -50,25 +50,35 @@ async def consume(
         except asyncio.TimeoutError:
             continue
 
-        age = _age_seconds(event.timestamp)
+        # A single malformed event or transient error must not kill the
+        # consumer -- if it did, run() would hang forever waiting on `stop`.
+        try:
+            # NOTE: event.timestamp is stamped when the feed parsed the
+            # message, so this measures pipeline latency, not true exchange-
+            # side staleness. For a strict 2s data-age rule, populate
+            # MarketOdds.timestamp from the Kalshi message's own timestamp.
+            age = _age_seconds(event.timestamp)
 
-        if isinstance(event, MarketOdds):
-            # Strict stale-data guard: ignore odds ticks older than the limit.
-            if age > stale_limit:
-                log.warning("dropping stale odds tick (age=%.2fs)", age)
+            if isinstance(event, MarketOdds):
+                if age > stale_limit:
+                    log.warning("dropping stale odds tick (age=%.2fs)", age)
+                    continue
+                engine.update_odds(event)
+            elif isinstance(event, GameState):
+                engine.update_game_state(event)
+                if event.is_final:
+                    log.info("final game state received; shutting down")
+                    stop.set()
+            else:  # pragma: no cover - queue is typed
                 continue
-            engine.update_odds(event)
-        elif isinstance(event, GameState):
-            engine.update_game_state(event)
-            if event.is_final:
-                log.info("final game state received; shutting down")
-                stop.set()
-        else:  # pragma: no cover - queue is typed
-            continue
 
-        signal_ = await engine.evaluate()
-        if signal_ is not None:
-            await executor.execute(signal_)
+            signal_ = await engine.evaluate()
+            if signal_ is not None:
+                await executor.execute(signal_)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep the consumer alive
+            log.exception("error processing feed event: %s", exc)
 
 
 async def run(cfg: AppConfig) -> None:
@@ -114,11 +124,20 @@ async def run(cfg: AppConfig) -> None:
                 consume(cfg, queue, engine, executor, stop), name="consumer"
             ),
         ]
+        # If any task exits unexpectedly, trip `stop` so run() never hangs.
+        for task in tasks:
+            task.add_done_callback(lambda _t: stop.set())
+
         await stop.wait()
         log.info("shutdown requested; cancelling tasks")
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for task, outcome in zip(tasks, outcomes):
+            if isinstance(outcome, Exception) and not isinstance(
+                outcome, asyncio.CancelledError
+            ):
+                log.error("task %s exited with error: %r", task.get_name(), outcome)
 
     engine.shutdown()
     log.info("final risk state: %s", risk.snapshot())

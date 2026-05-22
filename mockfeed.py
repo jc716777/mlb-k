@@ -53,6 +53,9 @@ class MockGameFeeder:
             self._state((True, True, False), "Walk. Runners on first and second."),
             stop,
         )
+        # The script is finite, but a feeder must stay alive for the whole
+        # session -- the odds feeder ends the run by setting `stop`.
+        await stop.wait()
 
     async def _emit(self, state: GameState, stop: asyncio.Event) -> None:
         if stop.is_set():
