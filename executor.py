@@ -119,6 +119,13 @@ class KalshiExecutor:
     def _build_order(
         self, signal: EdgeSignal, contracts: int, limit_price_cents: int
     ) -> dict:
+        """Build a Kalshi order body.
+
+        UNVERIFIED -- this is the LEGACY /portfolio/orders body. The V2
+        endpoint (/portfolio/events/orders) expects different fields: `price`
+        as fixed-point dollars, `count` as a string, side as bid/ask. Confirm
+        against the docs before live use.
+        """
         order: dict = {
             "ticker": signal.market_ticker,
             "client_order_id": str(uuid.uuid4()),

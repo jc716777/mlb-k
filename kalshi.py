@@ -119,7 +119,12 @@ class KalshiRestClient:
         return await self._request("GET", "/portfolio/positions")
 
     async def create_order(self, order: dict[str, Any], timeout_s: float = 5.0) -> dict[str, Any]:
-        """POST /portfolio/orders -- transmits a real order."""
+        """POST /portfolio/orders -- transmits a real order.
+
+        UNVERIFIED -- /portfolio/orders is the LEGACY endpoint (deprecation
+        began ~2026-05-06). The current path is /portfolio/events/orders (V2)
+        with a different body. Confirm against the docs before live use.
+        """
         return await self._request(
             "POST", "/portfolio/orders", json_body=order, timeout_s=timeout_s
         )

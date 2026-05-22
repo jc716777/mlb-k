@@ -180,13 +180,19 @@ class KalshiOddsFeeder:
 
     @staticmethod
     def _parse(msg: dict) -> Optional[MarketOdds]:
-        """Build a MarketOdds from a Kalshi ticker-channel message."""
+        """Build a MarketOdds from a Kalshi ticker-channel message.
+
+        UNVERIFIED -- likely wrong vs. the current API. Web docs indicate the
+        live `ticker` message uses `yes_bid_dollars`/`yes_ask_dollars` (price
+        in DOLLARS) and `ts_ms`, not the integer-cent `yes_bid`/`yes_ask`
+        fields read below. Confirm against a real message before live use.
+        """
         if msg.get("type") != "ticker":
             return None
         body = msg.get("msg", {})
         try:
-            yes_bid = int(body["yes_bid"])
-            yes_ask = int(body["yes_ask"])
+            yes_bid = int(body["yes_bid"])  # FIXME: likely yes_bid_dollars * 100
+            yes_ask = int(body["yes_ask"])  # FIXME: likely yes_ask_dollars * 100
             # Kalshi NO book is the mirror of the YES book.
             no_bid = 100 - yes_ask
             no_ask = 100 - yes_bid
